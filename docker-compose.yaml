@@ -44,14 +44,51 @@ services:
     environment:
       PORT: 4002
       DATABASE_URL: ${INVENTORY_DATABASE_URL}
-    ports:
-      - "${INVENTORY_PORT}:4002"    # public for now; Phase 3 hides it behind the gateway
+    # No "ports:" → reachable only inside the Docker network (http://inventory-service:4002).
+    # Services trust the x-user-* headers, so they MUST NOT be reachable from outside.
     volumes:
       - ./services/inventory:/app   # live code reload
       - /app/node_modules           # keep the container's own node_modules (Linux engines)
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
+
+  product-service:
+    build: ./services/product
+    init: true
+    environment:
+      PORT: 4001
+      DATABASE_URL: ${PRODUCT_DATABASE_URL}
+      INVENTORY_SERVICE_URL: ${INVENTORY_SERVICE_URL}   # container DNS name, not localhost
+      INVENTORY_TIMEOUT_MS: 2000
+    # No "ports:" (see inventory-service). Only the gateway is public.
+    volumes:
+      - ./services/product:/app
+      - /app/node_modules
+    # Deliberately NOT depending on inventory-service: product must start and
+    # serve reads even when inventory is down.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api-gateway:
+    build: ./api-gateway
+    init: true
+    environment:
+      PORT: 8081
+      PRODUCT_SERVICE_URL: ${PRODUCT_SERVICE_URL}
+      INVENTORY_SERVICE_URL: ${INVENTORY_SERVICE_URL}
+      ORDER_SERVICE_URL: ${ORDER_SERVICE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
+      CORS_ORIGIN: http://localhost:${CLIENT_PORT}
+    ports:
+      - "${GATEWAY_PORT}:8081"      # the ONLY public entry point for the app
+    volumes:
+      - ./api-gateway:/app
+      - /app/node_modules
     restart: unless-stopped
 
   adminer:

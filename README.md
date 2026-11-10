@@ -4,7 +4,7 @@ A small e-commerce system built to learn microservices hands-on: three Node.js s
 
 Based on the Stack Learner *Practical Microservices* course. The full design is in [PLAN.md](PLAN.md), and the current build status is in [PROGRESS.md](PROGRESS.md).
 
-> **Status:** Phases 0–1 (infrastructure, Inventory service) are done. The services are being built one phase at a time. See [Roadmap](#roadmap).
+> **Status:** Phases 0–3 (infrastructure, Inventory and Product services, API gateway) are done. The services are being built one phase at a time. See [Roadmap](#roadmap).
 
 ---
 
@@ -71,9 +71,22 @@ docker compose ps           # wait until postgres and rabbitmq show "healthy"
 |---|---|---|
 | Adminer (browse Postgres) | http://localhost:8080 | system `PostgreSQL`, server `postgres`, see the DB users below |
 | RabbitMQ management | http://localhost:15672 | `guest` / `guest` |
-| Inventory service | http://localhost:4002/health | none (public until Phase 3) |
-| API gateway *(Phase 3+)* | http://localhost:8081 | |
+| API gateway | http://localhost:8081/health | see [Demo users](#demo-users) |
 | React client *(Phase 6+)* | http://localhost:5173 | |
+
+### Demo users
+
+| Email | Password | Role |
+|---|---|---|
+| `admin@shop.test` | `admin123` | admin: create/edit products, adjust stock, see history |
+| `user@shop.test` | `user123` | user: place and view own orders |
+
+```bash
+TOKEN=$(curl -s -XPOST localhost:8081/auth/login -H 'content-type: application/json' \
+  -d '{"email":"admin@shop.test","password":"admin123"}' | jq -r .accessToken)
+curl -XPOST localhost:8081/products -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -d '{"sku":"MUG-01","name":"Mug","price":"8.00","status":"PUBLISHED","quantity":5}'
+```
 
 ### Database users
 
@@ -111,14 +124,14 @@ docker compose run --rm inventory-service yarn prisma migrate dev --name <what_c
 |---|---|
 | client | 5173 |
 | api-gateway | 8081 |
-| product-service | 4001 |
-| inventory-service | 4002 |
-| order-service | 4003 |
+| product-service | *(internal only: 4001)* |
+| inventory-service | *(internal only: 4002)* |
+| order-service | *(internal only: 4003)* |
 | postgres | 5432 |
 | rabbitmq | 5672 (AMQP), 15672 (UI) |
 | adminer | 8080 |
 
-All ports are set in `.env`. From Phase 3 on, only the gateway and the client are meant to be public. Services call each other through container DNS names (`http://inventory-service:4002`), never through the gateway.
+All ports are set in `.env`. The services publish **no** host port: they trust the `x-user-*` headers the gateway adds, so they must only be reachable from inside the Docker network. Only the gateway and the client are public. Services call each other through container DNS names (`http://inventory-service:4002`), never through the gateway.
 
 ---
 
@@ -127,6 +140,8 @@ All ports are set in `.env`. From Phase 3 on, only the gateway and the client ar
 | Method | Path | Auth |
 |---|---|---|
 | POST | `/auth/login` | public |
+| GET | `/auth/me` | any token |
+| GET | `/health` | public (gateway + every service) |
 | GET | `/products`, `/products/:id` | public |
 | POST / PUT | `/products`, `/products/:id` | admin |
 | GET | `/inventories/product/:productId` | public |
@@ -134,7 +149,7 @@ All ports are set in `.env`. From Phase 3 on, only the gateway and the client ar
 | GET | `/inventories/:id/history` | admin |
 | POST / GET | `/orders`, `/orders/:id` | user (own orders only) |
 
-The full request flows are in [PLAN.md §4](PLAN.md).
+Routes are defined in [api-gateway/src/config.json](api-gateway/src/config.json). Anything not listed there gets a 404 from the gateway (for example `POST /inventories`, which only product-service may call, directly). The full request flows are in [PLAN.md §4](PLAN.md).
 
 ---
 
@@ -145,10 +160,10 @@ micro-service-study/
 ├── docker-compose.yaml
 ├── .env.example                 # copy to .env
 ├── infra/postgres/init.sql      # creates the 3 DBs and users
-├── api-gateway/                 # Phase 3
+├── api-gateway/                 # routing table, JWT, rate limits
 ├── services/
-│   ├── product/                 # Phase 2
-│   ├── inventory/               # Phase 1
+│   ├── product/
+│   ├── inventory/
 │   └── order/                   # Phases 4–5
 ├── client/                      # Phase 6
 ├── PLAN.md                      # design and phase plan
@@ -163,8 +178,8 @@ micro-service-study/
 |---|---|---|
 | 0 | Infrastructure: Postgres, RabbitMQ, Adminer | ✅ |
 | 1 | Inventory service | ✅ |
-| 2 | Product service + sync call to inventory | ⏳ |
-| 3 | API gateway + JWT | ⏳ |
+| 2 | Product service + sync call to inventory | ✅ |
+| 3 | API gateway + JWT | ✅ |
 | 4 | Order service (sync part) | ⏳ |
 | 5 | RabbitMQ saga (order ↔ inventory) | ⏳ |
 | 6 | React client | ⏳ |

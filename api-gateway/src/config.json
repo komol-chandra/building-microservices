@@ -1,0 +1,22 @@
+{
+  "services": {
+    "product": "PRODUCT_SERVICE_URL",
+    "inventory": "INVENTORY_SERVICE_URL",
+    "order": "ORDER_SERVICE_URL"
+  },
+  "routes": [
+    { "method": "GET",  "path": "/products",                       "service": "product",   "roles": [] },
+    { "method": "GET",  "path": "/products/:id",                   "service": "product",   "roles": [] },
+    { "method": "POST", "path": "/products",                       "service": "product",   "roles": ["admin"] },
+    { "method": "PUT",  "path": "/products/:id",                   "service": "product",   "roles": ["admin"] },
+
+    { "method": "GET",  "path": "/inventories/product/:productId", "service": "inventory", "roles": [] },
+    { "method": "GET",  "path": "/inventories/:id",                "service": "inventory", "roles": ["admin"] },
+    { "method": "PUT",  "path": "/inventories/:id",                "service": "inventory", "roles": ["admin"] },
+    { "method": "GET",  "path": "/inventories/:id/history",        "service": "inventory", "roles": ["admin"] },
+
+    { "method": "POST", "path": "/orders",                         "service": "order",     "roles": ["user", "admin"] },
+    { "method": "GET",  "path": "/orders",                         "service": "order",     "roles": ["user", "admin"] },
+    { "method": "GET",  "path": "/orders/:id",                     "service": "order",     "roles": ["user", "admin"] }
+  ]
+}

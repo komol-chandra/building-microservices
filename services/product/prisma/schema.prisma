@@ -1,0 +1,32 @@
+// product_db — owned ONLY by product-service.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ProductStatus {
+  DRAFT
+  PUBLISHED
+  UNLISTED
+}
+
+model Product {
+  id          String        @id @default(uuid())
+  sku         String        @unique
+  name        String
+  description String?
+  // Money is NEVER a float. Decimal(10,2) is exact; JSON shows it as a string "19.99".
+  price       Decimal       @db.Decimal(10, 2)
+  status      ProductStatus @default(DRAFT)
+  // Plain string pointing into inventory_db. Not a FK: other service, other DB.
+  inventoryId String?       @unique
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([status, createdAt])
+}
