@@ -1,0 +1,47 @@
+// inventory_db — owned ONLY by inventory-service.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum StockActionType {
+  IN       // stock received (admin)
+  OUT      // stock removed: damage, manual correction (admin)
+  RESERVE  // taken by an order (Phase 5, via RabbitMQ)
+  RELEASE  // given back when an order is cancelled (Phase 5+)
+}
+
+model Inventory {
+  id                String   @id @default(uuid())
+  // Plain string, NOT a foreign key: the Product table lives in another
+  // service's database. We cannot (and must not) enforce it here.
+  productId         String   @unique
+  availableQuantity Int      @default(0)
+  reservedQuantity  Int      @default(0)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  histories StockHistory[]
+}
+
+// Append-only ledger. The Inventory row is the "current balance";
+// StockHistory is the audit trail explaining how we got there.
+model StockHistory {
+  id              String          @id @default(uuid())
+  inventoryId     String          // real FK: same database, same service
+  inventory       Inventory       @relation(fields: [inventoryId], references: [id], onDelete: Cascade)
+  actionType      StockActionType
+  quantityChanged Int
+  lastQuantity    Int             // availableQuantity before
+  currentQuantity Int             // availableQuantity after
+  reason          String?
+  orderId         String?         // set for RESERVE/RELEASE (Phase 5)
+  createdAt       DateTime        @default(now())
+
+  @@index([inventoryId, createdAt])
+}
