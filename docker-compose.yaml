@@ -73,6 +73,26 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  order-service:
+    build: ./services/order
+    init: true
+    environment:
+      PORT: 4003
+      DATABASE_URL: ${ORDER_DATABASE_URL}
+      PRODUCT_SERVICE_URL: ${PRODUCT_SERVICE_URL}
+      PRODUCT_TIMEOUT_MS: 2000
+      TAX_RATE: ${TAX_RATE}
+    # No "ports:" (see inventory-service). Only the gateway is public.
+    volumes:
+      - ./services/order:/app
+      - /app/node_modules
+    # Not depending on product-service: if product is down, POST /orders
+    # returns 503 but GET /orders (own DB only) keeps working.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   api-gateway:
     build: ./api-gateway
     init: true

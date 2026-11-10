@@ -4,7 +4,7 @@ A small e-commerce system built to learn microservices hands-on: three Node.js s
 
 Based on the Stack Learner *Practical Microservices* course. The full design is in [PLAN.md](PLAN.md), and the current build status is in [PROGRESS.md](PROGRESS.md).
 
-> **Status:** Phases 0–3 (infrastructure, Inventory and Product services, API gateway) are done. The services are being built one phase at a time. See [Roadmap](#roadmap).
+> **Status:** Phases 0–4 (infrastructure, Inventory, Product and Order services, API gateway) are done. The services are being built one phase at a time. See [Roadmap](#roadmap).
 
 ---
 
@@ -164,7 +164,7 @@ micro-service-study/
 ├── services/
 │   ├── product/
 │   ├── inventory/
-│   └── order/                   # Phases 4–5
+│   └── order/                   # Phase 4 (saga in Phase 5)
 ├── client/                      # Phase 6
 ├── PLAN.md                      # design and phase plan
 └── PROGRESS.md                  # where the build is now
@@ -180,7 +180,7 @@ micro-service-study/
 | 1 | Inventory service | ✅ |
 | 2 | Product service + sync call to inventory | ✅ |
 | 3 | API gateway + JWT | ✅ |
-| 4 | Order service (sync part) | ⏳ |
+| 4 | Order service (sync part) | ✅ |
 | 5 | RabbitMQ saga (order ↔ inventory) | ⏳ |
 | 6 | React client | ⏳ |
 | 7 | Docker polish: health checks, prod images, seed data | ⏳ |
