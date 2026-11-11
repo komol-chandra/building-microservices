@@ -44,6 +44,8 @@ services:
     environment:
       PORT: 4002
       DATABASE_URL: ${INVENTORY_DATABASE_URL}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE}
     # No "ports:" → reachable only inside the Docker network (http://inventory-service:4002).
     # Services trust the x-user-* headers, so they MUST NOT be reachable from outside.
     volumes:
@@ -82,6 +84,8 @@ services:
       PRODUCT_SERVICE_URL: ${PRODUCT_SERVICE_URL}
       PRODUCT_TIMEOUT_MS: 2000
       TAX_RATE: ${TAX_RATE}
+      RABBITMQ_URL: ${RABBITMQ_URL}
+      RABBITMQ_EXCHANGE: ${RABBITMQ_EXCHANGE}
     # No "ports:" (see inventory-service). Only the gateway is public.
     volumes:
       - ./services/order:/app

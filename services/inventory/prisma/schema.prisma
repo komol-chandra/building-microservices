@@ -12,7 +12,7 @@ datasource db {
 enum StockActionType {
   IN       // stock received (admin)
   OUT      // stock removed: damage, manual correction (admin)
-  RESERVE  // taken by an order (Phase 5, via RabbitMQ)
+  RESERVE  // taken by an order (order.placed event, via RabbitMQ)
   RELEASE  // given back when an order is cancelled (Phase 5+)
 }
 
@@ -44,4 +44,14 @@ model StockHistory {
   createdAt       DateTime        @default(now())
 
   @@index([inventoryId, createdAt])
+}
+
+// Idempotency: one row per order.placed event already handled. The result
+// event we sent is stored too, so a redelivered duplicate can re-send the SAME
+// result (the first attempt may have committed, then crashed before publishing).
+model ProcessedEvent {
+  eventId     String   @id
+  resultKey   String   // routing key we answered with: inventory.reserved | inventory.failed
+  result      Json     // the exact event we published
+  processedAt DateTime @default(now())
 }

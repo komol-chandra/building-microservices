@@ -4,7 +4,7 @@ A small e-commerce system built to learn microservices hands-on: three Node.js s
 
 Based on the Stack Learner *Practical Microservices* course. The full design is in [PLAN.md](PLAN.md), and the current build status is in [PROGRESS.md](PROGRESS.md).
 
-> **Status:** Phases 0–4 (infrastructure, Inventory, Product and Order services, API gateway) are done. The services are being built one phase at a time. See [Roadmap](#roadmap).
+> **Status:** Phases 0–5 (infrastructure, the three services, API gateway, RabbitMQ order saga) are done. The services are being built one phase at a time. See [Roadmap](#roadmap).
 
 ---
 
@@ -30,7 +30,7 @@ Based on the Stack Learner *Practical Microservices* course. The full design is 
 | Service | Owns | Talks to |
 |---|---|---|
 | **product** | `Product` | inventory (sync HTTP: creates stock, reads stock) |
-| **inventory** | `Inventory`, `StockHistory` | consumes `order.placed`, publishes `inventory.reserved` / `inventory.failed` |
+| **inventory** | `Inventory`, `StockHistory`, `ProcessedEvent` | consumes `order.placed`, publishes `inventory.reserved` / `inventory.failed` |
 | **order** | `Order`, `LineItem`, `ProcessedEvent` | product (sync HTTP for the snapshot), publishes `order.placed`, consumes `inventory.*` |
 | **api-gateway** | none | the only entry point for the UI; it signs and checks JWTs |
 
@@ -164,7 +164,7 @@ micro-service-study/
 ├── services/
 │   ├── product/
 │   ├── inventory/
-│   └── order/                   # Phase 4 (saga in Phase 5)
+│   └── order/
 ├── client/                      # Phase 6
 ├── PLAN.md                      # design and phase plan
 └── PROGRESS.md                  # where the build is now
@@ -181,7 +181,7 @@ micro-service-study/
 | 2 | Product service + sync call to inventory | ✅ |
 | 3 | API gateway + JWT | ✅ |
 | 4 | Order service (sync part) | ✅ |
-| 5 | RabbitMQ saga (order ↔ inventory) | ⏳ |
+| 5 | RabbitMQ saga (order ↔ inventory) | ✅ |
 | 6 | React client | ⏳ |
 | 7 | Docker polish: health checks, prod images, seed data | ⏳ |
 | 8 | Stretch: DLQ, outbox, tests, Cart/Email/Auth services, Kong | optional |

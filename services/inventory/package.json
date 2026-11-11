@@ -11,11 +11,13 @@
   },
   "dependencies": {
     "@prisma/client": "^6.0.0",
+    "amqplib": "^0.10",
     "express": "^5.1.0",
     "morgan": "^1.10.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@types/amqplib": "^0.10.8",
     "@types/express": "^5.0.0",
     "@types/morgan": "^1.9.9",
     "@types/node": "^20.0.0",

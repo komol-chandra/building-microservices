@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
@@ -5,6 +6,7 @@ import { HttpError } from '../errors';
 import { identity } from '../identity';
 import { createOrderSchema, idParam, listQuery } from '../schemas';
 import { getProduct } from '../clients/product';
+import { publish } from '../events/rabbit';
 
 const Decimal = Prisma.Decimal;
 const TAX_RATE = new Decimal(process.env.TAX_RATE ?? '0.05');
@@ -19,9 +21,11 @@ const money = (d: Prisma.Decimal) => d.toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
  *   4. copy name/sku/price into line items (SNAPSHOT) and compute totals with Decimal
  *   5. save Order + LineItems in ONE transaction (same DB → a real transaction works)
  *
- * The order is saved as PENDING. Stock is NOT checked here: in Phase 5 the
- * order.placed event asks inventory-service to reserve it, and the result
- * moves the order to CONFIRMED or FAILED.
+ *   6. publish order.placed
+ *
+ * The order is saved as PENDING. Stock is NOT checked here: the order.placed
+ * event asks inventory-service to reserve it, and its answer
+ * (events/inventory-result.ts) moves the order to CONFIRMED or FAILED.
  */
 export async function createOrder(req: Request, res: Response) {
   const { items } = createOrderSchema.parse(req.body);
@@ -61,6 +65,24 @@ export async function createOrder(req: Request, res: Response) {
     include: { items: true },
   });
 
+  // Saga step 1: tell inventory. It answers later with inventory.reserved|failed.
+  try {
+    await publish('order.placed', {
+      eventId: randomUUID(),
+      orderId: order.id,
+      items: order.items.map((li) => ({ productId: li.productId, quantity: li.quantity })),
+      occurredAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    // The order row is committed but the event isn't: nobody would ever reserve
+    // its stock, so it would stay PENDING forever. Compensate: fail it now.
+    // (Phase 8's outbox saves the event in the same DB transaction instead.)
+    console.error(`[order] order.placed publish failed for ${order.id}: ${(err as Error).message}`);
+    await prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', failureReason: 'Could not send order to inventory' } });
+    throw new HttpError(503, 'Order system busy, order was not placed. Please retry.');
+  }
+
+  // 201 with status PENDING: accepted, not finished. The client polls GET /orders/:id.
   res.status(201).json(order);
 }
 

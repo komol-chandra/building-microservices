@@ -53,3 +53,11 @@ model LineItem {
 
   @@index([orderId])
 }
+
+// Idempotency (Phase 5): RabbitMQ delivers "at least once", so the same
+// inventory.* event can arrive twice. Its eventId is inserted in the SAME
+// transaction as the order update; a second insert hits the PK → skip.
+model ProcessedEvent {
+  eventId     String   @id
+  processedAt DateTime @default(now())
+}
