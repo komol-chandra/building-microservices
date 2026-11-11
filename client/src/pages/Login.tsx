@@ -47,6 +47,7 @@ export default function Login() {
             </button>
           ))}
         </p>
+        <p className="muted">No account? <Link to="/register">Create one</Link></p>
         <Link to="/">← Back to products</Link>
       </form>
     </div>

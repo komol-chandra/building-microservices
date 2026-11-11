@@ -46,9 +46,11 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Token expired or invalid → drop it and go to login (but not for a failed login itself).
+// Token expired or invalid → drop it and go to login (but not for a failed login/register itself).
+// A 503 ("can't verify tokens right now") is NOT a reason to log out: the token may be fine.
 api.interceptors.response.use(undefined, (err: AxiosError) => {
-  if (err.response?.status === 401 && !err.config?.url?.startsWith('/auth/login')) {
+  const url = err.config?.url ?? '';
+  if (err.response?.status === 401 && !url.startsWith('/auth/login') && !url.startsWith('/auth/register')) {
     saveSession(null);
     window.location.assign('/login');
   }

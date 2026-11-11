@@ -4,6 +4,7 @@ import { useAuth } from './auth';
 import type { Role } from './api';
 import Layout from './components/Layout';
 import Login from './pages/Login';
+import Register from './pages/Register';
 import Products from './pages/Products';
 import ProductDetail from './pages/ProductDetail';
 import NewProduct from './pages/NewProduct';
@@ -23,6 +24,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/register" element={<Register />} />
       <Route element={<Layout />}>
         <Route path="/" element={<Products />} />
         <Route path="/products/new" element={<RequireAuth role="admin"><NewProduct /></RequireAuth>} />

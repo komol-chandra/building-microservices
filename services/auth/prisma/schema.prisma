@@ -1,0 +1,37 @@
+// auth_db: owned by auth-service only. Other services never read it;
+// they only see the identity the gateway copies out of a verified token.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  user
+  admin
+}
+
+model User {
+  id           String   @id @default(uuid())
+  email        String   @unique // stored lower-case
+  name         String
+  passwordHash String // "scrypt$N$r$p$salt$hash", never the password itself
+  role         Role     @default(user)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+// RS256 key pairs. The newest active key signs; every active key is published
+// in the JWKS, so tokens signed by an older key keep verifying until they expire.
+// (Study shortcut: a real system keeps private keys in a KMS / secret store, not in a table.)
+model SigningKey {
+  kid        String    @id
+  privateJwk Json
+  publicJwk  Json
+  createdAt  DateTime  @default(now())
+  retiredAt  DateTime?
+}

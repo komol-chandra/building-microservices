@@ -19,7 +19,7 @@
 | Language | **Node.js + TypeScript + Express**, package manager **yarn** | Same as course screenshot |
 | Runtime | **Docker Compose** for everything (infra + services + UI) | One command: `docker compose up` |
 
-**Out of scope for now** (stretch, see Phase 8): Auth/User service, Cart with 10-min TTL (Redis), Email service, Keycloak, Kong.
+**Out of scope at the start** (stretch, see Phase 8 and §7b): Auth/User service (done in Phase 9), Cart with 10-min TTL (Redis), Email service, Keycloak, Kong.
 
 ---
 
@@ -57,6 +57,7 @@ Every service owns its own DB. All databases live in **one Postgres container**,
 | product-service | 4001 | |
 | inventory-service | 4002 | |
 | order-service | 4003 | |
+| auth-service | 4004 | Phase 9, DB `auth_db` |
 | postgres | 5432 | DBs: `product_db`, `inventory_db`, `order_db` |
 | rabbitmq | 5672 / 15672 | 15672 = management UI (guest/guest) |
 | adminer (optional) | 8080 | browse Postgres |
@@ -228,6 +229,52 @@ Each phase ends with a **checkpoint**: commands you run and the result you shoul
 - Add the course's other services: **Auth/User**, **Cart** (Redis 10-min hold), **Email** (consumes `order.confirmed`)
 - Swap the custom gateway for **Kong**; auth with **Keycloak**
 - **Sokrio takeaways:** a note on which patterns apply to Sokrio (snapshot line items, stock history, async jobs over RabbitMQ)
+
+---
+
+## 7b. Phase 9+ — extra services (approved 2026-11-11)
+
+Recommended order: **9 Auth → 10 Email → 11 Cart → 12 Keycloak → 13 Kong**.
+Why this order: Auth first because it changes how tokens are verified (JWKS), which makes Keycloak a small swap later. Email is small and reuses the outbox. Kong is last because it replaces the gateway everything else is tested against.
+
+### Phase 9 — Auth/User service (`auth-service` :4004, `auth_db`)
+- Prisma `User` (id, email unique, name, passwordHash, role, createdAt). Passwords hashed with `node:crypto` **scrypt** (no native build deps).
+- Endpoints: `POST /auth/register` (role always `user`), `POST /auth/login`, `GET /auth/me`, `GET /users` (admin).
+- Tokens move from **HS256 shared secret → RS256**: only auth-service holds the private key; it publishes `GET /.well-known/jwks.json`. The gateway fetches and caches the public key (`jose` `createRemoteJWKSet`) and verifies locally. `kid` in the header → key rotation possible.
+- Gateway: `/auth/*` becomes proxied routes in `config.json`; `JWT_SECRET` and the demo-user list are removed. Login rate limit stays in the gateway.
+- Migration seeds the 2 demo users with the **same UUIDs** as today, so existing orders still belong to them.
+- Client: Register page.
+- **Checkpoint:** register → login → order CONFIRMED; a token signed with any other key → 401; `stop auth-service` → existing tokens still work (cached JWKS), login → 502 from the proxy; gateway restarted while auth is down → 503 (not 401); duplicate email → 409; rotate key → new tokens work without a gateway restart.
+- **Learn:** identity as its own service, asymmetric signing, why the gateway must not be able to mint tokens.
+
+### Phase 10 — Email service (`email-service` :4006, `email_db`, **Mailpit** :8025)
+- order-service publishes `order.confirmed` / `order.failed` through the **outbox**, in the same transaction as the status change (payload: orderId, userEmail, userName, totals, line items).
+- email-service consumes them (queue `email.order-events`, retry + DLQ like the others), renders a plain HTML email, sends via SMTP (nodemailer) to Mailpit. `SentEmail` table (eventId unique) = idempotency.
+- **Checkpoint:** order → email visible in Mailpit UI; same event sent twice → one email; Mailpit stopped → retries, then email arrives when it's back (or DLQ after 5).
+- **Learn:** a downstream consumer added without touching inventory; events as the integration point.
+
+### Phase 11 — Cart service (`cart-service` :4005, **Redis**)
+- Cart per user in Redis hash `cart:{userId}` → `{productId: qty}`, **TTL 10 min, reset on every change** (`CART_TTL_SECONDS`). Redis with AOF on, so a restart doesn't empty carts.
+- Endpoints: `GET /cart` (with product names/prices from product-service, one batched call), `PUT /cart/items/:productId`, `DELETE /cart/items/:productId`, `DELETE /cart`, `POST /cart/checkout` → calls order-service `POST /orders` (forwarding identity + request id), clears the cart only on 201.
+- **No stock hold** in inventory: the cart is only a list; the saga still decides at checkout. (A real hold = inventory HOLD rows + release on expiry; noted as an option, not built.)
+- Client: cart moves from localStorage to the server.
+- **Checkpoint:** cart survives page reload and other browsers; with TTL 30s the cart is gone after 30s idle; checkout → order CONFIRMED, cart empty; order-service down → checkout 503, cart kept.
+- **Learn:** ephemeral state in Redis, TTLs, service-to-service orchestration (checkout).
+
+### Phase 12 — Keycloak (replaces auth-service as the token issuer)
+- Keycloak container (`start-dev`, own Postgres DB) with a realm import: realm `shop`, public client `shop-client` (PKCE), realm roles `user` / `admin`, the 2 demo users.
+- Gateway verifies Keycloak tokens via its JWKS URL (same code as Phase 9, new issuer/audience) and maps `sub`, `email`, `name`, `realm_access.roles` → `x-user-*` headers.
+- Client logs in with redirect + PKCE (`oidc-client-ts`).
+- auth-service stays in the repo behind an env switch (`AUTH_ISSUER=local|keycloak`) for comparison.
+- **Checkpoint:** login via Keycloak page → order works; role change in Keycloak admin → effective on next token.
+- **Learn:** OIDC, delegating identity to a standard IdP vs building your own.
+
+### Phase 13 — Kong (alternative gateway, compose override `docker-compose.kong.yaml`)
+- Kong OSS DB-less, declarative `kong.yml`: same routes as `config.json`, plugins `cors`, `rate-limiting`, `correlation-id`, `jwt` (Keycloak RS256 public key).
+- Identity headers: strip client `x-user-*`, then a small `pre-function` (Lua) copies verified claims into `x-user-*` (Kong OSS has no OIDC plugin).
+- Runs on the same port 8081, so client and e2e suite run unchanged against it.
+- **Checkpoint:** e2e suite passes against Kong; forged `x-user-role` still ignored.
+- **Learn:** off-the-shelf gateway config vs our hand-written one; what we had to rebuild by hand.
 
 ---
 

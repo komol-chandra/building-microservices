@@ -18,6 +18,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       # Every *.sql in this folder runs once, on first boot of an empty volume.
       - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./infra/postgres/02-auth.sql:/docker-entrypoint-initdb.d/02-auth.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
       interval: 5s
@@ -122,6 +123,31 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  auth-service:
+    build: { context: ./services/auth, target: dev }
+    init: true
+    environment:
+      PORT: 4004
+      DATABASE_URL: ${AUTH_DATABASE_URL}
+      JWT_ISSUER: ${JWT_ISSUER}
+      JWT_AUDIENCE: ${JWT_AUDIENCE}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
+    # No "ports:". Login/register reach it through the gateway; the gateway
+    # fetches the public keys from http://auth-service:4004/.well-known/jwks.json
+    volumes:
+      - ./services/auth:/app
+      - /app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4004/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
   api-gateway:
     build: { context: ./api-gateway, target: dev }
     init: true
@@ -130,8 +156,10 @@ services:
       PRODUCT_SERVICE_URL: ${PRODUCT_SERVICE_URL}
       INVENTORY_SERVICE_URL: ${INVENTORY_SERVICE_URL}
       ORDER_SERVICE_URL: ${ORDER_SERVICE_URL}
-      JWT_SECRET: ${JWT_SECRET}
-      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
+      AUTH_JWKS_URL: ${AUTH_SERVICE_URL}/.well-known/jwks.json
+      JWT_ISSUER: ${JWT_ISSUER}
+      JWT_AUDIENCE: ${JWT_AUDIENCE}
       CORS_ORIGIN: http://localhost:${CLIENT_PORT}
     ports:
       - "${GATEWAY_PORT}:8081"      # the ONLY public entry point for the app
@@ -183,6 +211,8 @@ services:
     # (DB migrated, HTTP listening), which is exactly what the healthchecks report.
     depends_on:
       api-gateway:
+        condition: service_healthy
+      auth-service:               # seed logs in as admin
         condition: service_healthy
       product-service:
         condition: service_healthy

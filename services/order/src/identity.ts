@@ -21,11 +21,21 @@ export const requireIdentity: RequestHandler = (req, _res, next) => {
   next();
 };
 
+/** The gateway URL-encodes the name (header values must be ASCII). */
+function decodeName(raw: string | undefined): string {
+  if (!raw) return '';
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 export function identity(req: Request): Identity {
   return {
     id: req.header('x-user-id')!,
     email: req.header('x-user-email') ?? '',
-    name: req.header('x-user-name') ?? '',
+    name: decodeName(req.header('x-user-name')),
     role: req.header('x-user-role') ?? 'user',
   };
 }

@@ -1,11 +1,9 @@
-import { timingSafeEqual } from 'node:crypto';
 import type { RequestHandler } from 'express';
-import jwt from 'jsonwebtoken';
-import { z } from 'zod';
+import { createRemoteJWKSet, errors, jwtVerify, type JWTVerifyGetKey } from 'jose';
 
 export type Role = 'user' | 'admin';
 
-/** What we put inside the token. `sub` (subject) is the standard JWT field for the user id. */
+/** What the gateway needs from a verified token. `sub` (subject) = user id. */
 export interface Claims {
   sub: string;
   email: string;
@@ -13,74 +11,65 @@ export interface Claims {
   role: Role;
 }
 
-const SECRET: string = process.env.JWT_SECRET ?? '';
-if (!SECRET) throw new Error('JWT_SECRET is not set');
-const EXPIRES_IN = (process.env.JWT_EXPIRES_IN ?? '1h') as jwt.SignOptions['expiresIn'];
+/**
+ * Phase 9: the gateway no longer signs tokens or knows any users.
+ * auth-service signs with its PRIVATE key (RS256); the gateway verifies with
+ * the PUBLIC keys from auth-service's JWKS endpoint. The gateway can check a
+ * token but can never create one.
+ *
+ * createRemoteJWKSet caches the keys in memory:
+ *   - known `kid`   → verified locally, NO call to auth-service (fast, and works while it is down)
+ *   - unknown `kid` → refetch the JWKS once (key rotation), at most every 5s (cooldown).
+ *     jose's default cooldown is 30s: found in testing that a token from a freshly rotated key
+ *     then got 401 for up to 30s (→ the UI logs the user out). 5s is shorter than an
+ *     auth-service restart, and caps "unknown kid" spam at one JWKS fetch per 5s.
+ * cacheMaxAge = Infinity: never drop keys just because time passed. The trade-off:
+ * a key removed from the JWKS stays trusted until the gateway restarts.
+ */
+const ISSUER = process.env.JWT_ISSUER ?? 'auth-service';
+const AUDIENCE = process.env.JWT_AUDIENCE ?? 'shop';
 
-// Demo users. A real system has an Auth/User service with hashed passwords (Phase 8 stretch).
-const USERS: Array<Claims & { password: string }> = [
-  {
-    sub: '11111111-1111-4111-8111-111111111111',
-    email: 'admin@shop.test',
-    name: 'Shop Admin',
-    role: 'admin',
-    password: process.env.DEMO_ADMIN_PASSWORD ?? 'admin123',
-  },
-  {
-    sub: '22222222-2222-4222-8222-222222222222',
-    email: 'user@shop.test',
-    name: 'Demo User',
-    role: 'user',
-    password: process.env.DEMO_USER_PASSWORD ?? 'user123',
-  },
-];
-
-/** Constant-time compare, so response timing doesn't leak how much of the password matched. */
-function samePassword(a: string, b: string): boolean {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ba.length === bb.length && timingSafeEqual(ba, bb);
+let getKey: JWTVerifyGetKey | undefined;
+function keys(): JWTVerifyGetKey {
+  if (!getKey) {
+    const url = process.env.AUTH_JWKS_URL;
+    if (!url) throw new Error('AUTH_JWKS_URL is not set');
+    getKey = createRemoteJWKSet(new URL(url), { cacheMaxAge: Infinity, cooldownDuration: 5000, timeoutDuration: 2000 });
+  }
+  return getKey;
 }
 
-const loginSchema = z.object({ email: z.email(), password: z.string().min(1) });
+/** Tests inject a local key set instead of fetching one over HTTP. */
+export function setKeySource(k: JWTVerifyGetKey): void {
+  getKey = k;
+}
 
-// POST /auth/login
-export const login: RequestHandler = (req, res) => {
-  const parsed = loginSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: 'ValidationError', message: 'email and password are required' });
-    return;
-  }
-  const user = USERS.find((u) => u.email === parsed.data.email);
-  // Same message for "no such user" and "wrong password": don't reveal which emails exist.
-  if (!user || !samePassword(user.password, parsed.data.password)) {
-    res.status(401).json({ error: 'Unauthorized', message: 'Invalid email or password' });
-    return;
-  }
-  const { password: _pw, ...claims } = user;
-  const accessToken = jwt.sign(claims, SECRET, { algorithm: 'HS256', expiresIn: EXPIRES_IN });
-  res.json({ accessToken, tokenType: 'Bearer', expiresIn: EXPIRES_IN, user: claims });
-};
+export type VerifyResult = { ok: true; claims: Claims } | { ok: false; reason: 'invalid' | 'unavailable' };
 
-/** Returns the verified claims, or null. Pinning the algorithm blocks the "alg: none" trick. */
-export function verifyToken(header: string | undefined): Claims | null {
-  if (!header?.startsWith('Bearer ')) return null;
+/**
+ * invalid     → bad/expired/forged token, or signed by a key we don't know → 401
+ * unavailable → we couldn't get the keys (auth-service down, never fetched yet) → 503.
+ *               Not the client's fault, so not a 401 (the UI would log the user out).
+ */
+export async function verifyToken(header: string | undefined): Promise<VerifyResult> {
+  if (!header?.startsWith('Bearer ')) return { ok: false, reason: 'invalid' };
   try {
-    return jwt.verify(header.slice(7), SECRET, { algorithms: ['HS256'] }) as Claims;
-  } catch {
-    return null; // expired, bad signature, malformed...
+    const { payload } = await jwtVerify(header.slice(7), keys(), {
+      algorithms: ['RS256'], // pinned: blocks "alg: none" and HS256-with-the-public-key tricks
+      issuer: ISSUER,
+      audience: AUDIENCE,
+    });
+    const { sub, email, name, role } = payload as Partial<Claims>;
+    if (!sub || !email || (role !== 'user' && role !== 'admin')) return { ok: false, reason: 'invalid' };
+    return { ok: true, claims: { sub, email, name: name ?? '', role } };
+  } catch (e) {
+    const fetchProblem =
+      e instanceof errors.JWKSTimeout ||
+      !(e instanceof errors.JOSEError) || // network error (ECONNREFUSED, DNS...)
+      (e as errors.JOSEError).code === 'ERR_JOSE_GENERIC'; // JWKS answered non-200
+    return { ok: false, reason: fetchProblem ? 'unavailable' : 'invalid' };
   }
 }
-
-// GET /auth/me — handy for the UI and for debugging tokens.
-export const me: RequestHandler = (req, res) => {
-  const claims = verifyToken(req.headers.authorization);
-  if (!claims) {
-    res.status(401).json({ error: 'Unauthorized', message: 'Missing or invalid token' });
-    return;
-  }
-  res.json(claims);
-};
 
 export const IDENTITY_HEADERS = ['x-user-id', 'x-user-email', 'x-user-name', 'x-user-role'] as const;
 
@@ -91,21 +80,28 @@ export const IDENTITY_HEADERS = ['x-user-id', 'x-user-email', 'x-user-name', 'x-
  * On success, the identity is passed to the service as trusted headers.
  */
 export function authorize(roles: Role[]): RequestHandler {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     if (roles.length === 0) return next();
 
-    const claims = verifyToken(req.headers.authorization);
-    if (!claims) {
-      res.status(401).json({ error: 'Unauthorized', message: 'Missing or invalid token' });
+    const result = await verifyToken(req.headers.authorization);
+    if (!result.ok) {
+      if (result.reason === 'unavailable') {
+        console.error('[gateway] cannot load signing keys from auth-service');
+        res.status(503).json({ error: 'ServiceUnavailable', message: 'Cannot verify tokens right now (auth-service unavailable)' });
+      } else {
+        res.status(401).json({ error: 'Unauthorized', message: 'Missing or invalid token' });
+      }
       return;
     }
+    const { claims } = result;
     if (!roles.includes(claims.role)) {
       res.status(403).json({ error: 'Forbidden', message: `Requires role: ${roles.join(' or ')}` });
       return;
     }
     req.headers['x-user-id'] = claims.sub;
     req.headers['x-user-email'] = claims.email;
-    req.headers['x-user-name'] = claims.name;
+    // Header values must be ASCII; names may not be ("Komol কমল"), so the name is URL-encoded.
+    req.headers['x-user-name'] = encodeURIComponent(claims.name);
     req.headers['x-user-role'] = claims.role;
     next();
   };

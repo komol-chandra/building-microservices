@@ -4,7 +4,7 @@ A small e-commerce system built to learn microservices hands-on. It has three No
 
 It is based on the Stack Learner *Practical Microservices* course (the course PDF and the ER diagram are in the repo root). The full design is in [PLAN.md](PLAN.md), and the live build status and decision log are in [PROGRESS.md](PROGRESS.md).
 
-> **Status:** Phases 0–8 are done: infrastructure, the three services, the API gateway, the RabbitMQ order saga, the React client, Docker polish (health checks, prod images, seed data), and the reliability stretch goals (retry + dead-letter queue, transactional outbox, correlation-id logging, unit + end-to-end tests). Still optional: extra services (Auth, Cart, Email) and Kong/Keycloak. See the [Roadmap](#roadmap).
+> **Status:** Phases 0–9 are done: infrastructure, the product/inventory/order services, an auth-service (Phase 9), the API gateway, the RabbitMQ order saga, the React client, Docker polish (health checks, prod images, seed data), and the reliability stretch goals (retry + dead-letter queue, transactional outbox, correlation-id logging, unit + end-to-end tests). Next (optional): Email, Cart, Keycloak, Kong. See the [Roadmap](#roadmap).
 
 ## Contents
 
@@ -69,7 +69,7 @@ docker compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d --build
 
 ### Demo users
 
-These are hard-coded in the gateway ([api-gateway/src/auth.ts](api-gateway/src/auth.ts)). There is no user service yet.
+These are seeded by auth-service's first migration (scrypt-hashed, same ids as before Phase 9). Anyone can also create an account at `/register` (always role `user`); an admin can promote users with `PUT /users/:id/role`.
 
 | Email | Password | Role | Can do |
 |---|---|---|---|
@@ -83,6 +83,7 @@ These are hard-coded in the gateway ([api-gateway/src/auth.ts](api-gateway/src/a
 | `product_db` | `product_svc` | `product_pw` |
 | `inventory_db` | `inventory_svc` | `inventory_pw` |
 | `order_db` | `order_svc` | `order_pw` |
+| `auth_db` | `auth_svc` | `auth_pw` |
 | *(superuser)* | `postgres` | `postgres` |
 
 These are development-only credentials. Each service user can connect **only** to its own database (`REVOKE CONNECT ... FROM PUBLIC` in [infra/postgres/init.sql](infra/postgres/init.sql)).
@@ -115,9 +116,9 @@ curl -s localhost:8081/inventories/product/$PID | jq
   Browser ──▶ client (React, :5173)
                  │  every API call goes through the gateway
                  ▼
-            api-gateway (:8081)   JWT check · routing · rate limit · adds x-user-* headers
-             │        │        │
-             ▼        ▼        ▼
+            api-gateway (:8081)   JWT check (RS256 via JWKS) · routing · rate limit · adds x-user-* headers
+             │        │        │        └──────────────▶ auth (:4004) ── auth_db
+             ▼        ▼        ▼                         login/register, signs tokens, /.well-known/jwks.json
          product   inventory   order          (no host ports: Docker network only)
           :4001     :4002      :4003
              │  HTTP ─┘  ▲        │  HTTP (product snapshot)
@@ -133,7 +134,8 @@ curl -s localhost:8081/inventories/product/$PID | jq
 | **product** | `Product` | inventory (sync HTTP: creates the stock row, reads stock) |
 | **inventory** | `Inventory`, `StockHistory`, `ProcessedEvent` | consumes `order.placed`; publishes `inventory.reserved` / `inventory.failed` |
 | **order** | `Order`, `LineItem`, `ProcessedEvent` | product (sync HTTP for the snapshot); publishes `order.placed`; consumes `inventory.*` |
-| **api-gateway** | nothing (no DB) | the only entry point for the UI; signs and verifies JWTs |
+| **auth** | `User`, `SigningKey` | nobody (others reach it through the gateway); signs RS256 tokens, publishes the public keys |
+| **api-gateway** | nothing (no DB) | the only entry point for the UI; verifies JWTs with auth's public keys (can't create them) |
 | **client** | nothing (cart in localStorage) | gateway only, from the browser |
 
 ### Key ideas this project demonstrates
@@ -299,8 +301,12 @@ All calls go through the gateway at `http://localhost:8081`. Send `Authorization
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
+| POST | `/auth/register` | public | `{email, name, password (≥8)}` → 201 + same body as login. Role is always `user`. Taken email → 409. Limit 10/min. |
 | POST | `/auth/login` | public | `{email, password}` → `{accessToken, tokenType, expiresIn, user}`. Limit 10/min. |
-| GET | `/auth/me` | any token | Returns the verified claims |
+| GET | `/auth/me` | any token | The user, fresh from auth_db |
+| GET | `/.well-known/jwks.json` | public | Public signing keys (what the gateway verifies with) |
+| GET | `/users` | admin | All users (never the password hash) |
+| PUT | `/users/:id/role` | admin | `{role: "user" \| "admin"}`. Effective on that user's next token. Not on yourself (400). |
 | GET | `/health` | public | Gateway + every service. 200 if all up, 207 otherwise. |
 | GET | `/products` | public | `?page=&limit=&status=`. No stock in the list. |
 | GET | `/products/:id` | public | Includes `stock` (or `null` if inventory is down) |
@@ -331,9 +337,9 @@ Orders are scoped to `x-user-id` for every role, so an admin only sees their own
 1. **Request id.** Reuses or creates `x-request-id`, forwards it, and returns it in the response.
 2. **Strip identity headers.** Deletes `x-user-id`, `x-user-email`, `x-user-name` and `x-user-role` from the incoming request, so a client can't send `x-user-role: admin`.
 3. **CORS** for `http://localhost:5173`, plus morgan logging.
-4. **Rate limit**: 300/min globally (`RATE_LIMIT_PER_MIN`), 10/min on login.
-5. **Gateway endpoints**: `/auth/login`, `/auth/me`, `/health`. `express.json()` is used only on login, so proxied bodies stream through untouched.
-6. **Route table** from `config.json`. Each route has a method, path, service and roles. If the route has roles, the gateway verifies the JWT (HS256 pinned, which blocks the `alg: none` trick), checks the role, sets the `x-user-*` headers from the claims and proxies the request.
+4. **Rate limit**: 300/min globally (`RATE_LIMIT_PER_MIN`), 10/min on login and register.
+5. **Gateway endpoints**: only `/health`. Since Phase 9, login/register/me are ordinary routes to auth-service. The gateway never parses bodies, so they stream through untouched.
+6. **Route table** from `config.json`. Each route has a method, path, service and roles. If the route has roles, the gateway verifies the JWT (RS256 pinned, plus issuer and audience) with the public keys from auth-service's JWKS, checks the role, sets the `x-user-*` headers from the claims and proxies the request. `x-user-name` is URL-encoded (header values must be ASCII). Keys are cached; an unknown `kid` triggers one refetch (at most every 5s), so key rotation needs no gateway restart. If the keys can't be loaded at all → 503, not 401.
 7. **404** for everything else.
 
 Login compares passwords in constant time and returns the same message for an unknown email and a wrong password.
@@ -369,19 +375,19 @@ All settings are in `.env` (copied from [.env.example](.env.example)); Compose r
 |---|---|---|
 | `COMPOSE_PROJECT_NAME` | `msstudy` | Compose |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` | `postgres` / `postgres` | postgres, init.sql |
-| `PRODUCT_DATABASE_URL`, `INVENTORY_DATABASE_URL`, `ORDER_DATABASE_URL` | per-service user @ `postgres:5432` | each service |
+| `PRODUCT_DATABASE_URL`, `INVENTORY_DATABASE_URL`, `ORDER_DATABASE_URL`, `AUTH_DATABASE_URL` | per-service user @ `postgres:5432` | each service |
 | `RABBITMQ_USER` / `RABBITMQ_PASSWORD` | `guest` / `guest` | rabbitmq |
 | `RABBITMQ_URL` | `amqp://guest:guest@rabbitmq:5672` | inventory, order |
 | `RABBITMQ_EXCHANGE` | `ecommerce.events` | inventory, order |
-| `PRODUCT_SERVICE_URL`, `INVENTORY_SERVICE_URL`, `ORDER_SERVICE_URL` | `http://<name>-service:<port>` | gateway, product, order |
-| `JWT_SECRET` | `change-me-dev-only-secret` | gateway |
-| `JWT_EXPIRES_IN` | `1h` | gateway |
+| `PRODUCT_SERVICE_URL`, `INVENTORY_SERVICE_URL`, `ORDER_SERVICE_URL`, `AUTH_SERVICE_URL` | `http://<name>-service:<port>` | gateway, product, order |
+| `JWT_ISSUER` / `JWT_AUDIENCE` | `auth-service` / `shop` | auth (sets them), gateway (requires them) |
+| `JWT_EXPIRES_IN` | `1h` | auth |
 | `TAX_RATE` | `0.05` | order |
 | `OUTBOX_POLL_MS` | `1000` | order (outbox relay poll interval; new orders also trigger it at once) |
 | `RABBITMQ_MAX_ATTEMPTS` | `5` | inventory, order (attempts before a message goes to the DLQ) |
 | `*_PORT` | see [Ports](#ports) | Compose |
 
-Set directly in `docker-compose.yaml`: `INVENTORY_TIMEOUT_MS=2000` (product), `PRODUCT_TIMEOUT_MS=2000` (order), `CORS_ORIGIN` (gateway), `VITE_API_URL` (client; in the prod image it is a **build arg**, because Vite inlines it at build time). The 5s retry delay is a constant in `rabbit.ts`: it's a queue argument, and RabbitMQ refuses to re-declare a queue with different arguments. Optional in the gateway: `RATE_LIMIT_PER_MIN`, `DEMO_ADMIN_PASSWORD`, `DEMO_USER_PASSWORD`.
+Set directly in `docker-compose.yaml`: `INVENTORY_TIMEOUT_MS=2000` (product), `PRODUCT_TIMEOUT_MS=2000` (order), `CORS_ORIGIN` (gateway), `VITE_API_URL` (client; in the prod image it is a **build arg**, because Vite inlines it at build time). The 5s retry delay is a constant in `rabbit.ts`: it's a queue argument, and RabbitMQ refuses to re-declare a queue with different arguments. `AUTH_JWKS_URL` (gateway) is built from `AUTH_SERVICE_URL`. Optional in the gateway: `RATE_LIMIT_PER_MIN`.
 
 ### Ports
 
@@ -392,6 +398,7 @@ Set directly in `docker-compose.yaml`: `INVENTORY_TIMEOUT_MS=2000` (product), `P
 | product-service | *(internal only: 4001)* |
 | inventory-service | *(internal only: 4002)* |
 | order-service | *(internal only: 4003)* |
+| auth-service | *(internal only: 4004)* |
 | postgres | 5432 |
 | rabbitmq | 5672 (AMQP), 15672 (UI) |
 | adminer | 8080 |
@@ -455,6 +462,7 @@ The full dated log is in [PROGRESS.md](PROGRESS.md#decision-log). The main point
 - **Declare the whole topology everywhere.** If only the consumer declares its queue, an event published before that consumer first starts matches no queue and is silently dropped.
 - **RabbitMQ management stats lag about 5 seconds.** Don't panic if queue counts look stale.
 - **`init.sql` runs only on an empty volume.** After editing it, run `docker compose down -v`.
+- **Upgrading an existing (pre-Phase 9) volume:** auth_db doesn't exist yet. Create it once without losing data: `docker compose exec -T postgres psql -U postgres < infra/postgres/02-auth.sql`, then `docker compose up -d --build -V`.
 - **`node_modules` in a bind mount.** An anonymous volume (`/app/node_modules`) keeps the container's Linux modules separate from the host's.
 - **DNS inside compose containers.** `yarn add` inside a compose container failed with `EAI_AGAIN`. Workaround: run it in a throwaway container on the host network (see [Development workflow](#development-workflow)).
 - **Migration files are owned by root** because the container runs as root. Run `sudo chown -R $USER services/<svc>/prisma` after creating one.
@@ -474,12 +482,14 @@ The full dated log is in [PROGRESS.md](PROGRESS.md#decision-log). The main point
 These are deliberate for now.
 
 - **Reserved stock is never released or shipped.** There is no cancel or fulfilment step yet, so `reservedQuantity` only grows. `RELEASE` and `CANCELLED` exist in the schema but are unused.
-- **Demo users are hard-coded** in the gateway, with plain-text passwords. A real Auth/User service would hash them.
+- **Private signing keys live in auth_db** (`SigningKey` table). A real system keeps them in a KMS or secret store.
+- **No refresh tokens or logout-everywhere.** An access token is valid until it expires (1h); a role change applies on the next login.
+- **A key removed from the JWKS stays trusted until the gateway restarts** (keys are cached forever; only unknown `kid`s trigger a refetch).
 - **The `Authorization` header is still forwarded** to the services. It's harmless, but could be stripped.
 - **No alerting on the DLQ.** Messages there wait for someone to look at the RabbitMQ UI.
 - **Each e2e run leaves one garbage message** in `inventory.order-placed.dlq`; that's what the DLQ test checks. Purge it from the UI when you like.
 - **Unit tests cover pure logic only** (pricing, schemas, auth, route table). Handlers that touch the DB are covered by the e2e suite, not by isolated tests.
-- **No Auth/User, Cart or Email services, and no Kong/Keycloak** (optional Phase 8 items).
+- **No Cart or Email services, and no Kong/Keycloak yet** (Phases 10–13 in [PLAN.md](PLAN.md)).
 
 ---
 
@@ -490,7 +500,8 @@ These are deliberate for now.
 docker compose exec order-service yarn test       # pricing (Decimal, half-up tax), order + event schemas
 docker compose exec product-service yarn test     # price validation, the .partial() defaults regression
 docker compose exec inventory-service yarn test   # admin can't RESERVE, event contract
-docker compose exec api-gateway yarn test         # JWT (alg none, expiry, wrong secret), roles, login, route table
+docker compose exec api-gateway yarn test         # RS256 via JWKS (foreign key, iss/aud, alg none, expiry), roles, 503, route table
+docker compose exec auth-service yarn test        # scrypt hashing, register/login schemas, token signing
 
 # end-to-end: the whole stack through the gateway (works against the dev or the prod stack)
 docker compose --profile test run --rm e2e
@@ -553,14 +564,16 @@ micro-service-study/
 ├── .env.example                 # copy to .env
 ├── infra/
 │   ├── postgres/init.sql        # creates the 3 DBs, their users, and revokes cross-access
+│   ├── postgres/02-auth.sql     # auth_db + auth_svc (idempotent: also runnable on an existing volume)
 │   ├── rabbitmq/enabled_plugins # management + shovel ("Move messages" out of a DLQ)
 │   └── seed/seed.mjs            # demo products through the gateway (idempotent)
 ├── api-gateway/
-│   └── src/  index.ts · auth.ts (login, JWT, demo users) · utils.ts (proxy) · config.json (route table)
+│   └── src/  index.ts · auth.ts (JWKS verify, roles) · utils.ts (proxy) · config.json (route table)
 ├── services/
 │   ├── product/                 # clients/inventory.ts → sync HTTP to inventory
 │   ├── inventory/               # events/order-placed.ts → reserve stock; events/rabbit.ts (retry/DLQ)
-│   └── order/                   # pricing.ts, events/outbox.ts, events/inventory-result.ts, clients/product.ts
+│   ├── order/                   # pricing.ts, events/outbox.ts, events/inventory-result.ts, clients/product.ts
+│   └── auth/                    # passwords.ts (scrypt), keys.ts (RS256 + JWKS), tokens.ts, scripts/rotate-key.ts
 ├── client/                      # React + Vite
 │   ├── src/  pages/ · components/ · api.ts · auth.tsx · cart.tsx
 │   └── nginx.conf               # prod: SPA fallback + /healthz
@@ -587,4 +600,5 @@ micro-service-study/
 | 6 | React client | ✅ |
 | 7 | Docker polish: health checks, multi-stage prod images, seed data, one-command start from zero | ✅ |
 | 8 | Stretch: retry + DLQ, transactional outbox, correlation-id logging, Vitest + end-to-end saga test, Sokrio takeaways | ✅ |
-| 8+ | Optional: Auth/User service, Cart (Redis hold), Email (consumes order events), Kong + Keycloak | not started |
+| 9 | Auth/User service: register/login, scrypt, RS256 tokens + JWKS, key rotation | ✅ |
+| 10–13 | Optional: Email (Mailpit), Cart (Redis), Keycloak, Kong — see [PLAN.md](PLAN.md) §7b | not started |

@@ -2,9 +2,17 @@
   "services": {
     "product": "PRODUCT_SERVICE_URL",
     "inventory": "INVENTORY_SERVICE_URL",
-    "order": "ORDER_SERVICE_URL"
+    "order": "ORDER_SERVICE_URL",
+    "auth": "AUTH_SERVICE_URL"
   },
   "routes": [
+    { "method": "POST", "path": "/auth/register",                  "service": "auth",      "roles": [] },
+    { "method": "POST", "path": "/auth/login",                     "service": "auth",      "roles": [] },
+    { "method": "GET",  "path": "/auth/me",                        "service": "auth",      "roles": ["user", "admin"] },
+    { "method": "GET",  "path": "/.well-known/jwks.json",          "service": "auth",      "roles": [] },
+    { "method": "GET",  "path": "/users",                          "service": "auth",      "roles": ["admin"] },
+    { "method": "PUT",  "path": "/users/:id/role",                 "service": "auth",      "roles": ["admin"] },
+
     { "method": "GET",  "path": "/products",                       "service": "product",   "roles": [] },
     { "method": "GET",  "path": "/products/:id",                   "service": "product",   "roles": [] },
     { "method": "POST", "path": "/products",                       "service": "product",   "roles": ["admin"] },

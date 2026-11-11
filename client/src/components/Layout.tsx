@@ -25,7 +25,10 @@ export default function Layout() {
               <button className="link" onClick={() => { logout(); navigate('/'); }}>Log out</button>
             </>
           ) : (
-            <Link to="/login">Log in</Link>
+            <>
+              <Link to="/login">Log in</Link>
+              <Link to="/register">Register</Link>
+            </>
           )}
         </div>
       </header>

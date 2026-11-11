@@ -30,6 +30,12 @@ services:
       NODE_ENV: production
     volumes: !reset []
 
+  auth-service:
+    build: { context: ./services/auth, target: prod }
+    environment:
+      NODE_ENV: production
+    volumes: !reset []
+
   api-gateway:
     build: { context: ./api-gateway, target: prod }
     environment:

@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
-import { IDENTITY_HEADERS, login, me } from './auth';
+import { IDENTITY_HEADERS } from './auth';
 import { registerRoutes, serviceUrls } from './utils';
 
 const PORT = Number(process.env.PORT ?? 8081);
@@ -30,12 +30,12 @@ app.use(morgan(':method :url :status :response-time ms  req=:req[x-request-id]')
 
 // 3. Rate limits: a general one, and a strict one on login (slows password guessing).
 app.use(rateLimit({ windowMs: 60_000, limit: Number(process.env.RATE_LIMIT_PER_MIN ?? 300), standardHeaders: 'draft-7', legacyHeaders: false }));
+// Login/register are proxied to auth-service, but the limit lives here, at the edge.
 const loginLimiter = rateLimit({ windowMs: 60_000, limit: 10, standardHeaders: 'draft-7', legacyHeaders: false });
+app.post(['/auth/login', '/auth/register'], loginLimiter);
 
-// 4. Gateway's own endpoints. express.json() ONLY here: proxied routes must
-//    keep the raw body stream so it can be piped to the service untouched.
-app.post('/auth/login', loginLimiter, express.json(), login);
-app.get('/auth/me', me);
+// 4. (Phase 9) The gateway has no endpoints of its own except /health: login,
+//    register and /auth/me live in auth-service and are plain routes in config.json.
 
 // Aggregated health: gateway + every upstream (1s budget each, in parallel).
 app.get('/health', async (_req, res) => {

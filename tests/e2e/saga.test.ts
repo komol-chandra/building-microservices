@@ -74,7 +74,7 @@ describe('platform', () => {
   it('gateway and every service are up', async () => {
     const { status, body } = await call('GET', '/health');
     expect(status).toBe(200);
-    expect(body.services).toEqual({ product: 'up', inventory: 'up', order: 'up' });
+    expect(body.services).toEqual({ product: 'up', inventory: 'up', order: 'up', auth: 'up' });
   });
 
   it('echoes the correlation id', async () => {
@@ -97,6 +97,62 @@ describe('edge auth', () => {
 
   it('does not route internal endpoints', async () => {
     expect((await call('POST', '/inventories', { token: admin, body: { productId: 'x' } })).status).toBe(404);
+  });
+});
+
+describe('auth-service (Phase 9)', () => {
+  const email = `e2e-${RUN}@Shop.Test`;
+  let token: string;
+
+  it('register → 201, always role user (a role in the body is ignored), logged in at once', async () => {
+    const res = await call('POST', '/auth/register', { body: { email, name: 'E2E কমল', password: 'password123', role: 'admin' } });
+    expect(res.status).toBe(201);
+    expect(res.body.user).toMatchObject({ email: email.toLowerCase(), name: 'E2E কমল', role: 'user' });
+    token = res.body.accessToken;
+    expect((await call('GET', '/auth/me', { token })).body).toMatchObject({ email: email.toLowerCase(), role: 'user' });
+  });
+
+  it('same email in other casing → 409', async () => {
+    const res = await call('POST', '/auth/register', { body: { email: email.toUpperCase(), name: 'x', password: 'password123' } });
+    expect(res.status).toBe(409);
+  });
+
+  it('login: wrong password and unknown email look the same', async () => {
+    const a = await call('POST', '/auth/login', { body: { email, password: 'wrong-password' } });
+    const b = await call('POST', '/auth/login', { body: { email: `nobody-${RUN}@shop.test`, password: 'wrong-password' } });
+    expect([a.status, b.status]).toEqual([401, 401]);
+    expect(a.body).toEqual(b.body);
+  });
+
+  it('a new user can order; a non-ASCII name survives the x-user-name header', async () => {
+    const p = await createProduct('AUTHMUG', 2);
+    const { body } = await placeOrder([{ productId: p.id, quantity: 1 }], token);
+    expect(body.userName).toBe('E2E কমল');
+    expect((await waitForFinal(body.id, token)).status).toBe('CONFIRMED');
+  });
+
+  it('JWKS publishes public keys only', async () => {
+    const { body } = await call('GET', '/.well-known/jwks.json');
+    expect(body.keys.length).toBeGreaterThan(0);
+    for (const k of body.keys) {
+      expect(k).toMatchObject({ kty: 'RSA', alg: 'RS256' });
+      expect(k.d).toBeUndefined(); // private exponent never leaves auth-service
+    }
+  });
+
+  it('a token with a tampered payload (role → admin) is rejected', async () => {
+    const [h, p, sig] = token.split('.');
+    const claims = JSON.parse(Buffer.from(p, 'base64url').toString());
+    const forged = [h, Buffer.from(JSON.stringify({ ...claims, role: 'admin' })).toString('base64url'), sig].join('.');
+    expect((await call('GET', '/users', { token: forged })).status).toBe(401);
+  });
+
+  it('user admin endpoints: 403 for users, list for admins without password hashes', async () => {
+    expect((await call('GET', '/users', { token })).status).toBe(403);
+    const { status, body } = await call('GET', '/users', { token: admin });
+    expect(status).toBe(200);
+    expect(body.data.some((u: any) => u.email === email.toLowerCase())).toBe(true);
+    expect(body.data.every((u: any) => !('passwordHash' in u))).toBe(true);
   });
 });
 

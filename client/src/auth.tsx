@@ -4,6 +4,7 @@ import { api, loadSession, saveSession, type User } from './api';
 interface AuthState {
   user: User | null;
   login: (email: string, password: string) => Promise<void>;
+  register: (name: string, email: string, password: string) => Promise<void>;
   logout: () => void;
 }
 
@@ -12,10 +13,18 @@ const AuthContext = createContext<AuthState | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(() => loadSession()?.user ?? null);
 
-  async function login(email: string, password: string) {
-    const { data } = await api.post<{ accessToken: string; user: User }>('/auth/login', { email, password });
+  function start(data: { accessToken: string; user: User }) {
     saveSession({ token: data.accessToken, user: data.user });
     setUser(data.user);
+  }
+
+  async function login(email: string, password: string) {
+    start((await api.post('/auth/login', { email, password })).data);
+  }
+
+  // auth-service creates the account AND returns a token, so the user is logged in right away.
+  async function register(name: string, email: string, password: string) {
+    start((await api.post('/auth/register', { name, email, password })).data);
   }
 
   function logout() {
@@ -23,7 +32,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }
 
-  return <AuthContext.Provider value={{ user, login, logout }}>{children}</AuthContext.Provider>;
+  return <AuthContext.Provider value={{ user, login, register, logout }}>{children}</AuthContext.Provider>;
 }
 
 /**
