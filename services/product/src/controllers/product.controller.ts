@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import { prisma } from '../prisma';
 import { HttpError } from '../errors';
+import { log } from '../context';
 import { createProductSchema, idParam, listQuery, updateProductSchema } from '../schemas';
 import { createInventory, describeInventoryError, getStockByProductId } from '../clients/inventory';
 
@@ -27,7 +28,7 @@ export async function createProduct(req: Request, res: Response) {
     stock = await createInventory(product.id, quantity);
   } catch (err) {
     await prisma.product.delete({ where: { id: product.id } });
-    console.error(`[product] inventory create failed, product ${product.id} rolled back: ${describeInventoryError(err)}`);
+    log.error(`[product] inventory create failed, product ${product.id} rolled back: ${describeInventoryError(err)}`);
     throw new HttpError(503, 'Inventory service unavailable, product was not created. Please retry.');
   }
 

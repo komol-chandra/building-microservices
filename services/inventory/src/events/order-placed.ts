@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { prisma } from '../prisma';
 import { publish } from './rabbit';
+import { log } from '../context';
 
 // Contract of the event order-service publishes. Validated: never trust a message blindly.
 export const orderPlacedSchema = z.object({
@@ -36,7 +37,7 @@ export async function handleOrderPlaced(evt: z.infer<typeof orderPlacedSchema>) 
   // Idempotency: seen this event before? Re-send the same answer, change nothing.
   const done = await prisma.processedEvent.findUnique({ where: { eventId: evt.eventId } });
   if (done) {
-    console.log(`[inventory] duplicate order.placed ${evt.eventId} (order ${evt.orderId}), re-sending ${done.resultKey}`);
+    log.info(`[inventory] duplicate order.placed ${evt.eventId} (order ${evt.orderId}), re-sending ${done.resultKey}`);
     await publish(done.resultKey, done.result as { eventId: string });
     return;
   }
@@ -105,5 +106,5 @@ export async function handleOrderPlaced(evt: z.infer<typeof orderPlacedSchema>) 
 
   // If we crash right here, the message is redelivered and the "done" branch above re-sends it.
   await publish(resultKey, result);
-  console.log(`[inventory] order ${evt.orderId}: ${resultKey}`);
+  log.info(`[inventory] order ${evt.orderId}: ${resultKey}`);
 }

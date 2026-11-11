@@ -1,5 +1,6 @@
 import axios, { AxiosError } from 'axios';
 import { HttpError } from '../errors';
+import { log, requestId } from '../context';
 
 /**
  * HTTP client for product-service (direct, over the Docker network).
@@ -10,6 +11,13 @@ import { HttpError } from '../errors';
 const http = axios.create({
   baseURL: process.env.PRODUCT_SERVICE_URL ?? 'http://product-service:4001',
   timeout: Number(process.env.PRODUCT_TIMEOUT_MS ?? 2000),
+});
+
+// Pass the correlation id on, so product's log lines carry the same id as ours.
+http.interceptors.request.use((config) => {
+  const id = requestId();
+  if (id) config.headers['x-request-id'] = id;
+  return config;
 });
 
 export interface ProductDto {
@@ -31,7 +39,7 @@ export async function getProduct(id: string): Promise<ProductDto | null> {
   } catch (err) {
     if (err instanceof AxiosError && (err.response?.status === 404 || err.response?.status === 400)) return null;
     const why = err instanceof AxiosError ? (err.response ? `HTTP ${err.response.status}` : `${err.code}: ${err.message}`) : String(err);
-    console.error(`[product-client] lookup failed for ${id}: ${why}`);
+    log.error(`[product-client] lookup failed for ${id}: ${why}`);
     throw new HttpError(503, 'Product service unavailable, order was not placed. Please retry.');
   }
 }

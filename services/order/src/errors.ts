@@ -1,6 +1,7 @@
 import type { ErrorRequestHandler, RequestHandler } from 'express';
 import { ZodError } from 'zod';
 import { Prisma } from '@prisma/client';
+import { log } from './context';
 
 /** Throw this from a handler to send a specific HTTP status. */
 export class HttpError extends Error {
@@ -53,6 +54,6 @@ export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
       return;
     }
   }
-  console.error(err);
+  log.error(`unhandled error: ${(err as Error)?.stack ?? String(err)}`);
   res.status(500).json({ error: 'InternalError', message: 'Something went wrong' });
 };

@@ -1,4 +1,5 @@
 import axios, { AxiosError } from 'axios';
+import { log, requestId } from '../context';
 
 /**
  * HTTP client for inventory-service.
@@ -13,6 +14,13 @@ import axios, { AxiosError } from 'axios';
 const http = axios.create({
   baseURL: process.env.INVENTORY_SERVICE_URL ?? 'http://inventory-service:4002',
   timeout: Number(process.env.INVENTORY_TIMEOUT_MS ?? 2000),
+});
+
+// Pass the correlation id on, so inventory's log lines carry the same id as ours.
+http.interceptors.request.use((config) => {
+  const id = requestId();
+  if (id) config.headers['x-request-id'] = id;
+  return config;
 });
 
 export interface InventoryDto {
@@ -57,7 +65,7 @@ export async function getStockByProductId(productId: string): Promise<Stock | nu
     const { data } = await http.get<InventoryDto>(`/inventories/product/${encodeURIComponent(productId)}`);
     return toStock(data);
   } catch (err) {
-    console.warn(`[inventory-client] stock lookup failed for ${productId}: ${describe(err)}`);
+    log.warn(`[inventory-client] stock lookup failed for ${productId}: ${describe(err)}`);
     return null;
   }
 }

@@ -1,4 +1,9 @@
-# Phase 0: infrastructure only. Services are added phase by phase.
+# DEV stack: source bind-mounted, live reload.  `docker compose up -d`
+# PROD-like stack: see docker-compose.prod.yaml.
+#
+# Every app container has a healthcheck (GET /health), so `docker compose ps`
+# shows healthy/unhealthy, and `depends_on: condition: service_healthy` can wait
+# for a service that is really ready, not just started.
 name: ${COMPOSE_PROJECT_NAME:-msstudy}
 
 services:
@@ -30,6 +35,8 @@ services:
       - "${RABBITMQ_UI_PORT}:15672"   # management UI (browser)
     volumes:
       - rabbitdata:/var/lib/rabbitmq
+      # + shovel plugins: the UI gets "Move messages" (replay a .dlq back into its queue)
+      - ./infra/rabbitmq/enabled_plugins:/etc/rabbitmq/enabled_plugins:ro
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -39,7 +46,7 @@ services:
 
   # ---------------- application services ----------------
   inventory-service:
-    build: ./services/inventory
+    build: { context: ./services/inventory, target: dev }
     init: true                      # tiny init process: forwards SIGTERM, reaps zombies
     environment:
       PORT: 4002
@@ -54,10 +61,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4002/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   product-service:
-    build: ./services/product
+    build: { context: ./services/product, target: dev }
     init: true
     environment:
       PORT: 4001
@@ -73,10 +86,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4001/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   order-service:
-    build: ./services/order
+    build: { context: ./services/order, target: dev }
     init: true
     environment:
       PORT: 4003
@@ -95,10 +114,16 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4003/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
 
   api-gateway:
-    build: ./api-gateway
+    build: { context: ./api-gateway, target: dev }
     init: true
     environment:
       PORT: 8081
@@ -113,7 +138,72 @@ services:
     volumes:
       - ./api-gateway:/app
       - /app/node_modules
+    # /health answers 200 (all up) or 207 (some service down): both mean "the gateway itself works".
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8081/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
+
+  client:
+    build: { context: ./client, target: dev }
+    init: true
+    environment:
+      # The browser calls the gateway on the HOST port. It can't use
+      # http://api-gateway:8081: that name only resolves inside the Docker network.
+      VITE_API_URL: http://localhost:${GATEWAY_PORT}
+    ports:
+      - "${CLIENT_PORT}:5173"
+    volumes:
+      - ./client:/app
+      - /app/node_modules
+    # No depends_on: the client is static files + a dev server, it never calls
+    # the gateway itself. The browser does, at runtime.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:5173/').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # One-shot job: loads demo products + stock through the gateway, then exits.
+  # Idempotent (skips existing SKUs), so it is safe on every `up`.
+  # Re-run by hand:  docker compose run --rm seed
+  seed:
+    image: node:20-slim
+    command: ["node", "/seed/seed.mjs"]
+    environment:
+      GATEWAY_URL: http://api-gateway:8081
+    volumes:
+      - ./infra/seed:/seed:ro
+    # Here depends_on is worth it: seeding needs these three really READY
+    # (DB migrated, HTTP listening), which is exactly what the healthchecks report.
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+    restart: "no"
+
+  # End-to-end tests. Only with the "test" profile, so `up` never starts it:
+  #   docker compose --profile test run --rm e2e
+  e2e:
+    profiles: ["test"]
+    build: ./tests/e2e
+    environment:
+      GATEWAY_URL: http://api-gateway:8081
+      RABBITMQ_API_URL: http://rabbitmq:15672/api
+      RABBITMQ_API_CREDENTIALS: ${RABBITMQ_USER}:${RABBITMQ_PASSWORD}
+    depends_on:
+      seed:
+        condition: service_completed_successfully   # = the stack is up and ready
+      order-service:
+        condition: service_healthy
 
   adminer:
     image: adminer:4

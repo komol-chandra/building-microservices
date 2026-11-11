@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
+import { log } from '../context';
 
 // Contract of inventory.reserved / inventory.failed (extra fields like shortages are ignored).
 export const inventoryResultSchema = z.object({
@@ -17,13 +18,13 @@ export const inventoryResultSchema = z.object({
  */
 export async function handleInventoryResult(evt: z.infer<typeof inventoryResultSchema>, routingKey: string) {
   if (routingKey !== 'inventory.reserved' && routingKey !== 'inventory.failed') {
-    console.warn(`[order] ignoring unknown event ${routingKey}`); // inventory.* may grow new events later
+    log.warn(`[order] ignoring unknown event ${routingKey}`); // inventory.* may grow new events later
     return;
   }
   const confirmed = routingKey === 'inventory.reserved';
 
   try {
-    await prisma.$transaction(async (tx) => {
+    const moved = await prisma.$transaction(async (tx) => {
       await tx.processedEvent.create({ data: { eventId: evt.eventId } }); // duplicate → P2002 → whole tx rolls back
       const changed = await tx.order.updateMany({
         where: { id: evt.orderId, status: 'PENDING' },
@@ -32,15 +33,17 @@ export async function handleInventoryResult(evt: z.infer<typeof inventoryResultS
           : { status: 'FAILED', failureReason: evt.reason ?? 'Inventory could not reserve stock' },
       });
       if (changed.count === 0) {
-        // e.g. the order was already FAILED because publishing order.placed failed (see createOrder).
-        // If this is a reserve, that stock is now held for a dead order: the outbox pattern (Phase 8) prevents this.
-        console.warn(`[order] ${routingKey} for order ${evt.orderId}, but it is not PENDING: ignored`);
+        // The order already has a final status. Since the outbox, createOrder never fails an order
+        // on a publish error, so this means: a late duplicate, an unknown orderId, or an order
+        // changed by hand. (If it's a reserve, that stock is now held for an order that won't ship.)
+        log.warn(`[order] ${routingKey} for order ${evt.orderId}, but it is not PENDING: ignored`);
       }
+      return changed.count > 0;
     });
-    console.log(`[order] order ${evt.orderId} → ${confirmed ? 'CONFIRMED' : 'FAILED'}`);
+    if (moved) log.info(`[order] order ${evt.orderId} → ${confirmed ? 'CONFIRMED' : 'FAILED'}`);
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') {
-      console.log(`[order] duplicate ${routingKey} ${evt.eventId}, already processed`);
+      log.info(`[order] duplicate ${routingKey} ${evt.eventId}, already processed`);
       return; // handled before → ack, change nothing
     }
     throw e;

@@ -1,0 +1,54 @@
+# PROD-like stack. Layered ON TOP of docker-compose.yaml:
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.prod.yaml up -d --build
+#
+# What changes compared to dev:
+#   - each app builds its `prod` stage: compiled JS, production deps only, runs as `node` (not root)
+#   - no bind mounts (`!reset []`): the image is the whole app, nothing comes from your disk
+#   - NODE_ENV=production
+#   - the client is a static build served by nginx (port 80 in the container), not the Vite dev server
+#
+# Everything else (DBs, RabbitMQ, ports, env, healthchecks, seed) is inherited.
+# Still a LOCAL stack: the dev passwords and JWT secret in .env are not for real use.
+
+services:
+  inventory-service:
+    build: { context: ./services/inventory, target: prod }
+    environment:
+      NODE_ENV: production
+    volumes: !reset []
+
+  product-service:
+    build: { context: ./services/product, target: prod }
+    environment:
+      NODE_ENV: production
+    volumes: !reset []
+
+  order-service:
+    build: { context: ./services/order, target: prod }
+    environment:
+      NODE_ENV: production
+    volumes: !reset []
+
+  api-gateway:
+    build: { context: ./api-gateway, target: prod }
+    environment:
+      NODE_ENV: production
+    volumes: !reset []
+
+  client:
+    build:
+      context: ./client
+      target: prod
+      args:
+        # Inlined by Vite at build time (the browser calls the gateway on the host port).
+        VITE_API_URL: http://localhost:${GATEWAY_PORT}
+    ports: !override
+      - "${CLIENT_PORT}:80"
+    volumes: !reset []
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

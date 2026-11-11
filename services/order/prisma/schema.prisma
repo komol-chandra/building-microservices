@@ -61,3 +61,23 @@ model ProcessedEvent {
   eventId     String   @id
   processedAt DateTime @default(now())
 }
+
+// Transactional OUTBOX (Phase 8). Saving an order and publishing order.placed are
+// two different systems (Postgres, RabbitMQ): no single transaction covers both.
+// So we DON'T publish in the request. We insert the event into this table in the
+// SAME DB transaction as the order (both commit, or neither), and a background
+// relay (events/outbox.ts) publishes unpublished rows and stamps publishedAt.
+// RabbitMQ down? Rows wait here and go out when it's back. Nothing is lost, and
+// an order can never exist without its event.
+model OutboxEvent {
+  id            String    @id // = the event's eventId (consumers dedupe on it)
+  routingKey    String
+  payload       Json
+  correlationId String?
+  createdAt     DateTime  @default(now())
+  publishedAt   DateTime?
+  attempts      Int       @default(0)
+  lastError     String?
+
+  @@index([publishedAt, createdAt])
+}

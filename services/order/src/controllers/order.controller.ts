@@ -1,16 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import type { Request, Response } from 'express';
-import { Prisma } from '@prisma/client';
 import { prisma } from '../prisma';
 import { HttpError } from '../errors';
 import { identity } from '../identity';
+import { requestId } from '../context';
 import { createOrderSchema, idParam, listQuery } from '../schemas';
 import { getProduct } from '../clients/product';
-import { publish } from '../events/rabbit';
+import { computeTotals, mergeItems, priceLine } from '../pricing';
+import { kickOutbox } from '../events/outbox';
 
-const Decimal = Prisma.Decimal;
-const TAX_RATE = new Decimal(process.env.TAX_RATE ?? '0.05');
-const money = (d: Prisma.Decimal) => d.toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+const TAX_RATE = process.env.TAX_RATE ?? '0.05';
 
 /**
  * POST /orders  { items: [{ productId, quantity }] }
@@ -19,68 +18,65 @@ const money = (d: Prisma.Decimal) => d.toDecimalPlaces(2, Decimal.ROUND_HALF_UP)
  *   2. fetch every product from product-service, in parallel
  *   3. reject unknown or non-PUBLISHED products
  *   4. copy name/sku/price into line items (SNAPSHOT) and compute totals with Decimal
- *   5. save Order + LineItems in ONE transaction (same DB → a real transaction works)
+ *   5. ONE transaction: Order + LineItems + the order.placed event in the OUTBOX
+ *   6. nudge the outbox relay, answer 201 PENDING
  *
- *   6. publish order.placed
- *
- * The order is saved as PENDING. Stock is NOT checked here: the order.placed
- * event asks inventory-service to reserve it, and its answer
- * (events/inventory-result.ts) moves the order to CONFIRMED or FAILED.
+ * We do NOT publish to RabbitMQ here. The relay (events/outbox.ts) does, right
+ * after commit. So if RabbitMQ is down the order is still accepted (PENDING) and
+ * its event goes out when the broker is back: no lost events, no "order saved
+ * but never sent" state. inventory's answer (events/inventory-result.ts) later
+ * moves the order to CONFIRMED or FAILED.
  */
 export async function createOrder(req: Request, res: Response) {
   const { items } = createOrderSchema.parse(req.body);
   const user = identity(req);
 
-  const qtyById = new Map<string, number>();
-  for (const i of items) qtyById.set(i.productId, (qtyById.get(i.productId) ?? 0) + i.quantity);
-
+  const qtyById = mergeItems(items);
   const ids = [...qtyById.keys()];
   const products = await Promise.all(ids.map(getProduct));
 
   const unavailable = ids.filter((id, n) => products[n]?.status !== 'PUBLISHED');
   if (unavailable.length) throw new HttpError(400, 'Some products are not available', { productIds: unavailable });
 
-  const lineItems = products.map((p) => {
-    const quantity = qtyById.get(p!.id)!;
-    const price = new Decimal(p!.price);
-    return { productId: p!.id, productName: p!.name, sku: p!.sku, price, quantity, total: money(price.mul(quantity)) };
-  });
+  const lineItems = products.map((p) => ({
+    productId: p!.id,
+    productName: p!.name,
+    sku: p!.sku,
+    ...priceLine(p!.price, qtyById.get(p!.id)!),
+  }));
+  const totals = computeTotals(lineItems, TAX_RATE);
 
-  const subtotal = lineItems.reduce((sum, li) => sum.add(li.total), new Decimal(0));
-  const discount = new Decimal(0);
-  const tax = money(subtotal.sub(discount).mul(TAX_RATE));
-  const grandTotal = subtotal.sub(discount).add(tax);
-
-  const order = await prisma.order.create({
-    data: {
-      userId: user.id,
-      userName: user.name,
-      userEmail: user.email,
-      subtotal,
-      discount,
-      tax,
-      grandTotal,
-      items: { create: lineItems }, // nested create → Prisma wraps it in one transaction
-    },
-    include: { items: true },
-  });
-
-  // Saga step 1: tell inventory. It answers later with inventory.reserved|failed.
-  try {
-    await publish('order.placed', {
-      eventId: randomUUID(),
-      orderId: order.id,
-      items: order.items.map((li) => ({ productId: li.productId, quantity: li.quantity })),
-      occurredAt: new Date().toISOString(),
+  const order = await prisma.$transaction(async (tx) => {
+    const saved = await tx.order.create({
+      data: {
+        userId: user.id,
+        userName: user.name,
+        userEmail: user.email,
+        ...totals,
+        items: { create: lineItems },
+      },
+      include: { items: true },
     });
-  } catch (err) {
-    // The order row is committed but the event isn't: nobody would ever reserve
-    // its stock, so it would stay PENDING forever. Compensate: fail it now.
-    // (Phase 8's outbox saves the event in the same DB transaction instead.)
-    console.error(`[order] order.placed publish failed for ${order.id}: ${(err as Error).message}`);
-    await prisma.order.update({ where: { id: order.id }, data: { status: 'FAILED', failureReason: 'Could not send order to inventory' } });
-    throw new HttpError(503, 'Order system busy, order was not placed. Please retry.');
-  }
+
+    // Saga step 1, saved as a row (not sent yet): commits together with the order.
+    const eventId = randomUUID();
+    await tx.outboxEvent.create({
+      data: {
+        id: eventId,
+        routingKey: 'order.placed',
+        correlationId: requestId(),
+        payload: {
+          eventId,
+          orderId: saved.id,
+          items: saved.items.map((li) => ({ productId: li.productId, quantity: li.quantity })),
+          occurredAt: new Date().toISOString(),
+        },
+      },
+    });
+    return saved;
+  });
+
+  kickOutbox();
 
   // 201 with status PENDING: accepted, not finished. The client polls GET /orders/:id.
   res.status(201).json(order);
